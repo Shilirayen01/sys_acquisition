@@ -16,8 +16,16 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMachineRepository, MachineRepository>();
         services.AddSingleton<IDataPersistenceService, SqlBatchRepository>();
 
-        // OPC UA Service
-        services.AddSingleton<IFacDataService, OpcUaSubscriptionService>();
+        // Choix du service OPC UA (Réel vs Simulateur)
+        var useSimulator = configuration.GetValue<bool>("OpcSettings:UseSimulator");
+        if (useSimulator)
+        {
+            services.AddSingleton<IFacDataService, MockOpcUaService>();
+        }
+        else
+        {
+            services.AddSingleton<IFacDataService, OpcUaSubscriptionService>();
+        }
 
         // Kafka (Optional)
         services.AddSingleton<KafkaProducer>();
