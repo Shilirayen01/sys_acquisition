@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <!-- OPC UA Client -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.2" />
     <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua" Version="1.5.374.86" />
     
     <!-- Dapper + SQL Server -->
