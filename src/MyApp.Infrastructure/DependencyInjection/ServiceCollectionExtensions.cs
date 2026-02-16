@@ -5,6 +5,7 @@ using MyApp.Application.UseCases;
 using MyApp.Infrastructure.DapperRepositories;
 using MyApp.Infrastructure.OpcUa;
 using MyApp.Infrastructure.Kafka;
+using MyApp.Infrastructure.StoreForward;
 
 namespace MyApp.Infrastructure.DependencyInjection;
 
@@ -12,6 +13,9 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        // Store & Forward (doit être enregistré avant SqlBatchRepository)
+        services.AddSingleton<IStoreForwardService, JsonStoreForwardService>();
+        
         // Repositories (Dapper)
         services.AddSingleton<IMachineRepository, MachineRepository>();
         services.AddSingleton<IDataPersistenceService, SqlBatchRepository>();

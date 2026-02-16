@@ -4,6 +4,9 @@ namespace MyApp.Application.DTOs;
 
 /// <summary>
 /// DTO représentant une valeur de tag reçue d'OPC UA
+/// Le rôle d'un DTO :
+///  C'est un simple "conteneur" de données sans logique métier, 
+/// utilisé uniquement pour transporter des informations entre les couches (ex: de l'abonnement OPC UA vers le Repository).
 /// </summary>
 public class TagValueDto
 {

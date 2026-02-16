@@ -17,20 +17,27 @@ public class SqlBatchRepository : IDataPersistenceService
 {
     private readonly string _connectionString;
     private readonly ILogger<SqlBatchRepository> _logger;
+    private readonly IStoreForwardService _storeForwardService;
     private readonly ConcurrentQueue<TagValueDto> _buffer = new();
     private readonly SemaphoreSlim _flushLock = new(1, 1);
     private const int DefaultBatchSize = 1000;
     private const int AutoFlushThreshold = 5000; // Flush automatique à 5000 éléments
+    
+    private bool _isDbAvailable = true;
+    private DateTime _lastConnectionAttempt = DateTime.MinValue;
+    private int _consecutiveFailures = 0;
 
     public int PendingCount => _buffer.Count;
 
     public SqlBatchRepository(
         IConfiguration configuration,
-        ILogger<SqlBatchRepository> logger)
+        ILogger<SqlBatchRepository> logger,
+        IStoreForwardService storeForwardService)
     {
         _connectionString = configuration.GetConnectionString("DefaultConnection") 
             ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found");
         _logger = logger;
+        _storeForwardService = storeForwardService;
     }
 
     /// <summary>
@@ -65,6 +72,7 @@ public class SqlBatchRepository : IDataPersistenceService
 
     /// <summary>
     /// Vide le buffer et force l'insertion immédiate dans la base de données
+    /// Bascule vers le store-and-forward en cas d'échec
     /// </summary>
     public async Task FlushAsync(CancellationToken cancellationToken = default)
     {
@@ -99,21 +107,50 @@ public class SqlBatchRepository : IDataPersistenceService
                 .Select(g => g.Select(x => x.value).ToList())
                 .ToList();
 
-            using var connection = new SqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
-
-            foreach (var batch in batches)
+            try
             {
-                await InsertBatchToDbAsync(connection, batch, cancellationToken);
-            }
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync(cancellationToken);
 
-            _logger.LogInformation("Successfully flushed {TotalCount} tag values in {BatchCount} batches", 
-                itemsToFlush.Count, batches.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error flushing buffer to database");
-            throw;
+                foreach (var batch in batches)
+                {
+                    await InsertBatchToDbAsync(connection, batch, cancellationToken);
+                }
+
+                _logger.LogInformation("Successfully flushed {TotalCount} tag values in {BatchCount} batches", 
+                    itemsToFlush.Count, batches.Count);
+
+                // Réinitialiser le compteur d'échecs si succès
+                if (!_isDbAvailable)
+                {
+                    _logger.LogInformation("Database connection restored!");
+                    _isDbAvailable = true;
+                    _consecutiveFailures = 0;
+                    
+                    // Tenter de vider le store-and-forward
+                    await TryForwardStoredDataAsync(cancellationToken);
+                }
+            }
+            catch (SqlException ex)
+            {
+                _isDbAvailable = false;
+                _consecutiveFailures++;
+                _lastConnectionAttempt = DateTime.UtcNow;
+
+                _logger.LogError(ex, "Database connection failed (attempt {Failures}). Storing data locally...", 
+                    _consecutiveFailures);
+
+                // Stocker localement
+                await _storeForwardService.StoreAsync(itemsToFlush, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unexpected error flushing buffer");
+                
+                // En cas d'erreur inattendue, stocker aussi localement par sécurité
+                await _storeForwardService.StoreAsync(itemsToFlush, cancellationToken);
+                throw;
+            }
         }
         finally
         {
@@ -191,6 +228,125 @@ public class SqlBatchRepository : IDataPersistenceService
 
         await connection.ExecuteAsync(query, parameters);
         _logger.LogDebug("Inserted batch of {Count} tag values using direct insert", batch.Count);
+    }
+
+    /// <summary>
+    /// Tente de vider les données stockées localement après reconnexion
+    /// </summary>
+    private async Task TryForwardStoredDataAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var storedCount = await _storeForwardService.GetStoredCountAsync(cancellationToken);
+            
+            if (storedCount == 0)
+            {
+                _logger.LogInformation("No stored data to forward");
+                return;
+            }
+
+            _logger.LogInformation("Forwarding {Count} stored records to database...", storedCount);
+
+            var batches = await _storeForwardService.GetStoredBatchesAsync(cancellationToken);
+            var forwardedCount = 0;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            foreach (var batch in batches)
+            {
+                var batchList = batch.ToList();
+                
+                var subBatches = batchList
+                    .Select((value, index) => new { value, index })
+                    .GroupBy(x => x.index / DefaultBatchSize)
+                    .Select(g => g.Select(x => x.value).ToList())
+                    .ToList();
+
+                foreach (var subBatch in subBatches)
+                {
+                    await InsertBatchToDbAsync(connection, subBatch, cancellationToken);
+                    forwardedCount += subBatch.Count;
+                }
+            }
+
+            _logger.LogInformation("Successfully forwarded {Count} stored records to database", forwardedCount);
+
+            // Nettoyer tous les fichiers après succès
+            await _storeForwardService.ClearAllAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error forwarding stored data. Will retry later.");
+            _isDbAvailable = false;
+        }
+    }
+
+    /// <summary>
+    /// Vérifie si la base de données est accessible
+    /// </summary>
+    public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
+    {
+        // Si la DB est marquée comme disponible, vérifier avec un ping
+        try
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            
+            // Simple ping pour vérifier la connectivité
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            await cmd.ExecuteScalarAsync(cancellationToken);
+            
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Tente de reconnecter et de vider les données locales
+    /// </summary>
+    public async Task TryRecoverAsync(CancellationToken cancellationToken = default)
+    {
+        if (_isDbAvailable)
+        {
+            return; // Pas besoin de récupérer
+        }
+
+        // Backoff exponentiel : ne pas réessayer trop souvent
+        var backoffSeconds = Math.Min(Math.Pow(2, _consecutiveFailures), 60);
+        var nextAttempt = _lastConnectionAttempt.AddSeconds(backoffSeconds);
+
+        if (DateTime.UtcNow < nextAttempt)
+        {
+            return; // Trop tôt pour réessayer
+        }
+
+        _logger.LogInformation("Attempting database reconnection (attempt {Attempts}, backoff: {Backoff}s)...", 
+            _consecutiveFailures + 1, backoffSeconds);
+
+        _lastConnectionAttempt = DateTime.UtcNow;
+
+        var isHealthy = await IsHealthyAsync(cancellationToken);
+        
+        if (isHealthy)
+        {
+            _logger.LogInformation("Database connection restored!");
+            _isDbAvailable = true;
+            _consecutiveFailures = 0;
+
+            // Vider les données stockées localement
+            await TryForwardStoredDataAsync(cancellationToken);
+        }
+        else
+        {
+            _consecutiveFailures++;
+            _logger.LogWarning("Database still unavailable. Next retry in {Backoff}s", 
+                Math.Min(Math.Pow(2, _consecutiveFailures), 60));
+        }
     }
 
     /// <summary>

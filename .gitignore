@@ -109,3 +109,4 @@ npm-debug.log*
 *.lock
 .gemini/
 build.log
+store-forward/

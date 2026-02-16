@@ -92,7 +92,7 @@ public class MockOpcUaService : IFacDataService
                     };
 
                     DataReceived?.Invoke(this, dto);
-                    _logger.LogDebug("📡 [SIMULATEUR] Donnée simulée envoyée : {NodeId} = {Value}", dto.NodeId, value);
+                    _logger.LogDebug(" [SIMULATEUR] Donnée simulée envoyée : {NodeId} = {Value}", dto.NodeId, value);
                 }
             }
         }

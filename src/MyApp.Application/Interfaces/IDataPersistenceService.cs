@@ -30,4 +30,14 @@ public interface IDataPersistenceService
     /// Nombre d'éléments en attente dans le buffer
     /// </summary>
     int PendingCount { get; }
+    
+    /// <summary>
+    /// Vérifie si la base de données est accessible
+    /// </summary>
+    Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Tente de reconnecter et de vider les données stockées localement
+    /// </summary>
+    Task TryRecoverAsync(CancellationToken cancellationToken = default);
 }

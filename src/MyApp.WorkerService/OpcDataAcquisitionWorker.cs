@@ -48,16 +48,18 @@ public class OpcDataAcquisitionWorker : BackgroundService
 
             // 3. Boucle de monitoring et de flush automatique
             var flushIntervalSeconds = _configuration.GetValue<int>("BatchSettings:FlushIntervalSeconds", 10);
+            var healthCheckIntervalSeconds = _configuration.GetValue<int>("ResilienceSettings:HealthCheckIntervalSeconds", 30);
+            var lastHealthCheck = DateTime.UtcNow;
             
             while (!stoppingToken.IsCancellationRequested)
             {
                 // Attendre l'intervalle de flush
                 await Task.Delay(TimeSpan.FromSeconds(flushIntervalSeconds), stoppingToken);
 
-                // Optionnel: Reconnexion automatique si nécessaire
+                // Reconnexion OPC UA si nécessaire
                 if (!_facDataService.IsConnected)
                 {
-                    _logger.LogWarning("Perte de connexion détectée. Tentative de reconnexion...");
+                    _logger.LogWarning("Perte de connexion OPC UA détectée. Tentative de reconnexion...");
                     await _facDataService.ReconnectAsync(stoppingToken);
                 }
 
@@ -66,6 +68,13 @@ public class OpcDataAcquisitionWorker : BackgroundService
                 {
                     _logger.LogDebug("Flush automatique de {Count} éléments...", _persistenceService.PendingCount);
                     await _persistenceService.FlushAsync(stoppingToken);
+                }
+
+                // Vérification périodique de la santé de la DB et tentative de récupération
+                if ((DateTime.UtcNow - lastHealthCheck).TotalSeconds >= healthCheckIntervalSeconds)
+                {
+                    lastHealthCheck = DateTime.UtcNow;
+                    await _persistenceService.TryRecoverAsync(stoppingToken);
                 }
             }
         }
